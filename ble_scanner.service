@@ -1,7 +1,7 @@
 [Unit]
 Description=BLE Device Scanner for Home Assistant
-After=network.target bluetooth.target
-Wants=bluetooth.target
+After=network.target bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
+Wants=bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/ble_scanner/ble_scanner.py

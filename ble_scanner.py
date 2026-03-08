@@ -129,6 +129,9 @@ async def scan_loop(client: mqtt.Client):
                     seen_rssi[addr.upper()] = adv.rssi
         except Exception as exc:
             log.error("Scan error: %s", exc)
+            if "powered" in str(exc).lower() or "adapter" in str(exc).lower():
+                log.info("Waiting 10s for Bluetooth adapter...")
+                await asyncio.sleep(10)
 
         now = time.monotonic()
         for mac, nick in DEVICES.items():

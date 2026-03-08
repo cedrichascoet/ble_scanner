@@ -1,0 +1,18 @@
+[Unit]
+Description=BLE Device Scanner for Home Assistant
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/ble_scanner/ble_scanner.py
+Restart=always
+RestartSec=5
+User=root
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ble_scanner
+
+[Install]
+WantedBy=multi-user.target

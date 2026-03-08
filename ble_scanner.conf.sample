@@ -1,0 +1,18 @@
+[bluetooth]
+# Scan window in seconds (lower = faster, min ~1.0)
+scan_duration = 2.0
+# Seconds without a detection before marking as not_home
+expiry_time = 60
+
+[devices]
+# mac = nickname  (nickname is used in MQTT topic and HA entity name)
+AA:BB:CC:DD:EE:FF = tracker1
+BB:CC:DD:EE:FF:00 = tracker2
+
+[mqtt]
+host = 192.168.x.x
+port = 1883
+user = mqtt
+password = changeme
+# $(hostname) is expanded at runtime; default is homeassistant/$(hostname)
+topic = homeassistant/$(hostname)

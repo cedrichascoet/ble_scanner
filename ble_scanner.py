@@ -39,10 +39,10 @@ if not _cfg.has_section("devices") or not _cfg.items("devices"):
 # {MAC_UPPER: nickname}
 DEVICES = {mac.upper(): nick for mac, nick in _cfg.items("devices")}
 
-MQTT_HOST       = _cfg.get("mqtt", "host")
-MQTT_PORT       = _cfg.getint("mqtt", "port", fallback=1883)
-MQTT_USER       = _cfg.get("mqtt", "user")
-MQTT_PASSWORD   = _cfg.get("mqtt", "password")
+MQTT_HOST     = _cfg.get("mqtt", "host")
+MQTT_PORT     = _cfg.getint("mqtt", "port", fallback=1883)
+MQTT_USER     = _cfg.get("mqtt", "user")
+MQTT_PASSWORD = _cfg.get("mqtt", "password")
 
 HOSTNAME        = socket.gethostname()
 MQTT_TOPIC_BASE = _cfg.get("mqtt", "topic", fallback=f"homeassistant/{HOSTNAME}").replace("$(hostname)", HOSTNAME)
@@ -52,6 +52,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger(__name__)
+
 
 def state_topic(nickname: str) -> str:
     return f"{MQTT_TOPIC_BASE}/{nickname}/state"
@@ -78,6 +79,12 @@ def build_discovery_payload(mac: str, nickname: str) -> dict:
         },
     }
 
+# Pre-built once; reused on every MQTT reconnect
+_DISCOVERY_PAYLOADS = {
+    mac: json.dumps(build_discovery_payload(mac, nick))
+    for mac, nick in DEVICES.items()
+}
+
 
 def mqtt_connect() -> mqtt.Client:
     client = mqtt.Client(client_id=f"ble_scanner_{HOSTNAME}", clean_session=True)
@@ -87,7 +94,7 @@ def mqtt_connect() -> mqtt.Client:
         if rc == 0:
             log.info("MQTT connected")
             for mac, nick in DEVICES.items():
-                c.publish(discovery_topic(nick), json.dumps(build_discovery_payload(mac, nick)), retain=True)
+                c.publish(discovery_topic(nick), _DISCOVERY_PAYLOADS[mac], retain=True)
         else:
             log.error("MQTT connect failed, rc=%d", rc)
 
@@ -102,8 +109,9 @@ def mqtt_connect() -> mqtt.Client:
 
 
 async def scan_loop(client: mqtt.Client):
-    # {mac: last_seen monotonic timestamp}
-    last_seen: dict[str, float] = {mac: time.monotonic() for mac in DEVICES}
+    # Populated only when a device has actually been seen
+    last_seen: dict[str, float] = {}
+    last_rssi: dict[str, int] = {}
     last_state: dict[str, str] = {}
 
     def publish_state(mac: str, nick: str, state: str, rssi: int | None = None):
@@ -111,39 +119,45 @@ async def scan_loop(client: mqtt.Client):
             client.publish(state_topic(nick), state, retain=True)
             log.info("[%s] state -> %s", nick, state)
             last_state[mac] = state
-        attrs = {
-            "last_seen": datetime.now(timezone.utc).isoformat(),
-            "rssi": rssi,
-            "mac": mac,
-        }
-        client.publish(attr_topic(nick), json.dumps(attrs), retain=True)
+        # Only publish attributes when the device is present
+        if rssi is not None:
+            attrs = {
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+                "rssi": rssi,
+                "mac": mac,
+            }
+            client.publish(attr_topic(nick), json.dumps(attrs), retain=True)
+
+    def detection_callback(device, advertisement_data):
+        mac = device.address.upper()
+        if mac in DEVICES:
+            last_seen[mac] = time.monotonic()
+            last_rssi[mac] = advertisement_data.rssi
 
     log.info("Scanning for %d device(s), expiry=%ss", len(DEVICES), EXPIRY_TIME)
 
     while True:
-        seen_rssi: dict[str, int] = {}
         try:
-            discovered = await BleakScanner.discover(timeout=SCAN_DURATION, return_adv=True)
-            for addr, (_, adv) in discovered.items():
-                if addr.upper() in DEVICES:
-                    seen_rssi[addr.upper()] = adv.rssi
+            async with BleakScanner(detection_callback=detection_callback):
+                while True:
+                    await asyncio.sleep(SCAN_DURATION)
+                    now = time.monotonic()
+                    for mac, nick in DEVICES.items():
+                        # Unseen devices use a virtual last_seen of EXPIRY_TIME ago
+                        elapsed = now - last_seen.get(mac, now - EXPIRY_TIME)
+                        if elapsed < EXPIRY_TIME:
+                            publish_state(mac, nick, "home", last_rssi.get(mac))
+                            log.debug("[%s] seen RSSI=%s", nick, last_rssi.get(mac))
+                        else:
+                            log.debug("[%s] not seen (%.0fs ago)", nick, elapsed)
+                            publish_state(mac, nick, "not_home")
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             log.error("Scan error: %s", exc)
             if "powered" in str(exc).lower() or "adapter" in str(exc).lower():
                 log.info("Waiting 10s for Bluetooth adapter...")
-                await asyncio.sleep(10)
-
-        now = time.monotonic()
-        for mac, nick in DEVICES.items():
-            if mac in seen_rssi:
-                last_seen[mac] = now
-                publish_state(mac, nick, "home", seen_rssi[mac])
-                log.debug("[%s] seen RSSI=%s", nick, seen_rssi[mac])
-            else:
-                elapsed = now - last_seen[mac]
-                log.debug("[%s] not seen (%.0fs ago)", nick, elapsed)
-                if elapsed >= EXPIRY_TIME:
-                    publish_state(mac, nick, "not_home")
+            await asyncio.sleep(10)
 
 
 async def main():

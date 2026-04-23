@@ -4,10 +4,11 @@ Lightweight Python script that continuously scans for BLE devices on a Raspberry
 
 ## Features
 
-- Continuous BLE scanning using [bleak](https://github.com/hbldh/bleak)
-- Multiple devices in a single scan pass
+- Persistent BLE scanning using [bleak](https://github.com/hbldh/bleak) — adapter stays open continuously, no start/stop overhead per cycle
+- Instant detection via advertisement callback — devices are seen as soon as they advertise, not at the end of a fixed scan window
+- Multiple devices tracked in a single scanner
 - Automatic Home Assistant MQTT discovery (appears as `device_tracker` entities)
-- Publishes `home` / `not_home` state + JSON attributes (RSSI, last seen, MAC)
+- Publishes `home` / `not_home` state + JSON attributes (RSSI, last seen, MAC) — attributes only sent when device is present
 - Time-based expiry: marks a device away only after it has not been seen for a configurable duration
 - Graceful shutdown on SIGINT / SIGTERM
 
@@ -37,7 +38,7 @@ The script searches for the config in this order:
 
 ```ini
 [bluetooth]
-scan_duration = 2.0       # BLE scan window in seconds (lower = faster, min ~1.0)
+scan_duration = 2.0       # Check interval in seconds (how often expiry is evaluated)
 expiry_time = 60          # seconds without detection before marking as not_home
 
 [devices]
@@ -46,7 +47,7 @@ AA:BB:CC:DD:EE:FF = tracker1_bob
 AA:BB:CC:DD:EE:FF = tracker2_roger
 
 [mqtt]
-host = 192.169.x.x
+host = 192.168.x.x
 port = 1883
 user = mqtt
 password = changeme
@@ -56,7 +57,7 @@ topic = homeassistant/$(hostname)
 
 | Key              | Section    | Description                                   |
 |------------------|------------|-----------------------------------------------|
-| `scan_duration`  | bluetooth  | BLE scan window in seconds                    |
+| `scan_duration`  | bluetooth  | How often (in seconds) the expiry check runs; scanning itself is continuous |
 | `expiry_time`    | bluetooth  | Seconds without detection before marking as `not_home` (default: 60) |
 | `mac = nickname` | devices    | One entry per device; nickname used in MQTT topic and HA entity name |
 | `host`           | mqtt       | MQTT broker IP or hostname                    |
@@ -122,6 +123,6 @@ Each device appears as:
 
 ## Tuning
 
-- **Faster detection:** lower `scan_duration` to `1.0` — minimum reliable value depends on the BT adapter
+- **Faster state updates:** lower `scan_duration` to `1.0` to reduce the delay between a device being detected and its state being published — detection itself is immediate regardless of this value
 - **Reduce false away:** raise `expiry_time` (e.g. `120`) to wait longer before going `not_home`
 - **Debug logging:** change `logging.basicConfig(level=logging.INFO, ...)` to `level=logging.DEBUG`

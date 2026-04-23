@@ -133,6 +133,8 @@ async def scan_loop(client: mqtt.Client):
         if mac in DEVICES:
             last_seen[mac] = time.monotonic()
             last_rssi[mac] = advertisement_data.rssi
+            # Publish home immediately on first detection (don't wait for the check loop)
+            publish_state(mac, DEVICES[mac], "home", advertisement_data.rssi)
 
     log.info("Scanning for %d device(s), expiry=%ss", len(DEVICES), EXPIRY_TIME)
 
@@ -145,12 +147,11 @@ async def scan_loop(client: mqtt.Client):
                     for mac, nick in DEVICES.items():
                         # Unseen devices use a virtual last_seen of EXPIRY_TIME ago
                         elapsed = now - last_seen.get(mac, now - EXPIRY_TIME)
-                        if elapsed < EXPIRY_TIME:
-                            publish_state(mac, nick, "home", last_rssi.get(mac))
-                            log.debug("[%s] seen RSSI=%s", nick, last_rssi.get(mac))
-                        else:
+                        if elapsed >= EXPIRY_TIME:
                             log.debug("[%s] not seen (%.0fs ago)", nick, elapsed)
                             publish_state(mac, nick, "not_home")
+                        else:
+                            log.debug("[%s] seen RSSI=%s", nick, last_rssi.get(mac))
         except asyncio.CancelledError:
             raise
         except Exception as exc:

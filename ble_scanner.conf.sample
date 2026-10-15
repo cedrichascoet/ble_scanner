@@ -1,8 +1,10 @@
 [bluetooth]
-# Scan window in seconds (lower = faster, min ~1.0)
+# How often (seconds) absent devices are checked; scanning itself is continuous
 scan_duration = 2.0
 # Seconds without a detection before marking as not_home
 expiry_time = 60
+# Minimum seconds between attribute (RSSI, last_seen) updates while present
+attr_interval = 30
 
 [devices]
 # mac = nickname  (nickname is used in MQTT topic and HA entity name)
@@ -16,3 +18,7 @@ user = mqtt
 password = changeme
 # $(hostname) is expanded at runtime; default is homeassistant/$(hostname)
 topic = homeassistant/$(hostname)
+
+[logging]
+# DEBUG, INFO, WARNING or ERROR
+level = INFO

@@ -19,6 +19,7 @@ from bleak import BleakScanner
 import paho.mqtt.client as mqtt
 
 # --- Load configuration ---
+# Every file found is read; later ones override earlier ones.
 _CONF_SEARCH = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "ble_scanner.conf"),
     "/etc/ble_scanner.conf",
@@ -32,6 +33,7 @@ if not _loaded:
 
 SCAN_DURATION = _cfg.getfloat("bluetooth", "scan_duration", fallback=2.0)
 EXPIRY_TIME   = _cfg.getfloat("bluetooth", "expiry_time", fallback=60.0)
+ATTR_INTERVAL = _cfg.getfloat("bluetooth", "attr_interval", fallback=30.0)
 
 if not _cfg.has_section("devices") or not _cfg.items("devices"):
     print("ERROR: no [devices] entries in config", file=sys.stderr)
@@ -48,10 +50,16 @@ HOSTNAME        = socket.gethostname()
 MQTT_TOPIC_BASE = _cfg.get("mqtt", "topic", fallback=f"homeassistant/{HOSTNAME}").replace("$(hostname)", HOSTNAME)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=_cfg.get("logging", "level", fallback="INFO").upper(),
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger(__name__)
+
+# Last known state per MAC, shared by the scanner and MQTT reconnects.
+last_seen: dict[str, float] = {}
+last_rssi: dict[str, int] = {}
+last_state: dict[str, str] = {}
+last_attr: dict[str, float] = {}
 
 
 def state_topic(nickname: str) -> str:
@@ -59,6 +67,9 @@ def state_topic(nickname: str) -> str:
 
 def attr_topic(nickname: str) -> str:
     return f"{MQTT_TOPIC_BASE}/{nickname}/attributes"
+
+# One per scanner: the broker publishes "offline" here when it loses us.
+AVAILABILITY_TOPIC = f"{MQTT_TOPIC_BASE}/availability"
 
 def discovery_topic(nickname: str) -> str:
     return f"homeassistant/device_tracker/{HOSTNAME}_{nickname}/config"
@@ -69,6 +80,9 @@ def build_discovery_payload(mac: str, nickname: str) -> dict:
         "unique_id": f"{HOSTNAME}_{nickname}",
         "state_topic": state_topic(nickname),
         "json_attributes_topic": attr_topic(nickname),
+        "availability_topic": AVAILABILITY_TOPIC,
+        "payload_available": "online",
+        "payload_not_available": "offline",
         "payload_home": "home",
         "payload_not_home": "not_home",
         "source_type": "bluetooth_le",
@@ -92,17 +106,26 @@ def mqtt_connect() -> mqtt.Client:
     except AttributeError:
         client = mqtt.Client(client_id=f"ble_scanner_{HOSTNAME}", clean_session=True)
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+    # Crash, power loss or network loss: HA shows the trackers as unavailable
+    # instead of keeping the last retained state forever.
+    client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
 
     def on_connect(c, userdata, flags, rc):
         if rc == 0:
             log.info("MQTT connected")
             for mac, nick in DEVICES.items():
                 c.publish(discovery_topic(nick), _DISCOVERY_PAYLOADS[mac], retain=True)
+            # Anything published while disconnected was dropped: resend it.
+            for mac, state in list(last_state.items()):
+                c.publish(state_topic(DEVICES[mac]), state, retain=True)
+            c.publish(AVAILABILITY_TOPIC, "online", retain=True)
         else:
             log.error("MQTT connect failed, rc=%d", rc)
 
     def on_disconnect(c, userdata, rc):
-        log.warning("MQTT disconnected rc=%d, will reconnect", rc)
+        # rc 0 is our own disconnect() at shutdown.
+        if rc != 0:
+            log.warning("MQTT disconnected rc=%d, will reconnect", rc)
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -112,34 +135,41 @@ def mqtt_connect() -> mqtt.Client:
 
 
 async def scan_loop(client: mqtt.Client):
-    # Populated only when a device has actually been seen
-    last_seen: dict[str, float] = {}
-    last_rssi: dict[str, int] = {}
-    last_state: dict[str, str] = {}
-
-    def publish_state(mac: str, nick: str, state: str, rssi: int | None = None):
+    def publish_state(mac: str, nick: str, state: str):
         if state != last_state.get(mac):
             client.publish(state_topic(nick), state, retain=True)
             log.info("[%s] state -> %s", nick, state)
             last_state[mac] = state
-        # Only publish attributes when the device is present
-        if rssi is not None:
-            attrs = {
-                "last_seen": datetime.now(timezone.utc).isoformat(),
-                "rssi": rssi,
-                "mac": mac,
-            }
-            client.publish(attr_topic(nick), json.dumps(attrs), retain=True)
+
+    def publish_attributes(mac: str, nick: str, rssi: int):
+        attrs = {
+            "last_seen": datetime.now(timezone.utc).isoformat(),
+            "rssi": rssi,
+            "mac": mac,
+        }
+        client.publish(attr_topic(nick), json.dumps(attrs), retain=True)
+        last_attr[mac] = time.monotonic()
 
     def detection_callback(device, advertisement_data):
         mac = device.address.upper()
         if mac in DEVICES:
-            last_seen[mac] = time.monotonic()
+            nick = DEVICES[mac]
+            now = time.monotonic()
+            last_seen[mac] = now
             last_rssi[mac] = advertisement_data.rssi
+            arriving = last_state.get(mac) != "home"
             # Publish home immediately on first detection (don't wait for the check loop)
-            publish_state(mac, DEVICES[mac], "home", advertisement_data.rssi)
+            publish_state(mac, nick, "home")
+            # A tag advertises about once a second: throttle the attributes,
+            # which HA would otherwise record on every advertisement.
+            if arriving or now - last_attr.get(mac, 0.0) >= ATTR_INTERVAL:
+                publish_attributes(mac, nick, advertisement_data.rssi)
 
-    log.info("Scanning for %d device(s), expiry=%ss", len(DEVICES), EXPIRY_TIME)
+    log.info("Scanning for %d device(s), expiry=%ss, attributes every %ss",
+             len(DEVICES), EXPIRY_TIME, ATTR_INTERVAL)
+    # Unseen devices count as seen at startup, so a restart does not flap
+    # everyone to not_home before the first advertisement arrives.
+    started = time.monotonic()
 
     while True:
         try:
@@ -148,8 +178,7 @@ async def scan_loop(client: mqtt.Client):
                     await asyncio.sleep(SCAN_DURATION)
                     now = time.monotonic()
                     for mac, nick in DEVICES.items():
-                        # Unseen devices use a virtual last_seen of EXPIRY_TIME ago
-                        elapsed = now - last_seen.get(mac, now - EXPIRY_TIME)
+                        elapsed = now - last_seen.get(mac, started)
                         if elapsed >= EXPIRY_TIME:
                             log.debug("[%s] not seen (%.0fs ago)", nick, elapsed)
                             publish_state(mac, nick, "not_home")
@@ -169,9 +198,8 @@ async def scan_loop(client: mqtt.Client):
 
 
 async def main():
+    # Connects in the background; on_connect resends whatever was missed.
     client = mqtt_connect()
-    # Give MQTT a moment to connect
-    await asyncio.sleep(1)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -191,10 +219,14 @@ async def main():
     except asyncio.CancelledError:
         pass
 
-    for mac, nick in DEVICES.items():
-        client.publish(state_topic(nick), "not_home", retain=True)
-    client.loop_stop()
+    # Wait for the last messages to leave before disconnecting, or they are lost.
+    infos = [client.publish(state_topic(nick), "not_home", retain=True) for nick in DEVICES.values()]
+    infos.append(client.publish(AVAILABILITY_TOPIC, "offline", retain=True))
+    for info in infos:
+        if info.rc == mqtt.MQTT_ERR_SUCCESS:
+            info.wait_for_publish(timeout=2)
     client.disconnect()
+    client.loop_stop()
 
 
 if __name__ == "__main__":

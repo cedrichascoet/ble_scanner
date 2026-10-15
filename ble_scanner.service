@@ -1,13 +1,39 @@
 [Unit]
 Description=BLE Device Scanner for Home Assistant
-After=network.target bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
-Wants=bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
+After=network-online.target bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
+Wants=network-online.target bluetooth.target sys-subsystem-bluetooth-devices-hci0.device
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/ble_scanner/ble_scanner.py
 Restart=always
 RestartSec=5
-User=root
+
+# No root needed: bleak talks to BlueZ over D-Bus, which Debian opens to the
+# bluetooth group. Create the user with:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin -G bluetooth ble_scanner
+User=ble_scanner
+Group=ble_scanner
+SupplementaryGroups=bluetooth
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Sandboxing: the scanner only needs D-Bus (AF_UNIX) and the MQTT broker.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
 
 # Logging
 StandardOutput=journal

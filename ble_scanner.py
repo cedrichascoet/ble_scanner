@@ -87,7 +87,10 @@ _DISCOVERY_PAYLOADS = {
 
 
 def mqtt_connect() -> mqtt.Client:
-    client = mqtt.Client(client_id=f"ble_scanner_{HOSTNAME}", clean_session=True)
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"ble_scanner_{HOSTNAME}", clean_session=True)
+    except AttributeError:
+        client = mqtt.Client(client_id=f"ble_scanner_{HOSTNAME}", clean_session=True)
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 
     def on_connect(c, userdata, flags, rc):
@@ -155,6 +158,10 @@ async def scan_loop(client: mqtt.Client):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                log.info("Scan stopped")
+                raise asyncio.CancelledError() from exc
             log.error("Scan error: %s", exc)
             if "powered" in str(exc).lower() or "adapter" in str(exc).lower():
                 log.info("Waiting 10s for Bluetooth adapter...")
